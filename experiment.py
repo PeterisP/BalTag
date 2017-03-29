@@ -1,57 +1,124 @@
 import os
+import time
+import datetime
+import pickle
 from gensim.models import Word2Vec
-
+from collections import namedtuple
 from lt_document import LTDocument
 from vocabularies import Vocabularies
 from feature_factory import FeatureFactory
 from tagger import Tagger
 
 # Experiment configuration
-EXPERIMENT_NR = 1
-SMALL = True  # Iff true, use only a small subsample for a proof of concept test
-DEFAULT_EPOCHS = 3
-USE_WORDFORM_EMBEDDINGS = False
-USE_WORDSHAPE = True
-USE_NGRAMS = True
-OUTPUT_ATTRIBUTES = True
+Configuration = namedtuple('Configuration', ['input_embeddings', 'input_wordshape', 'input_ngrams', 'small_sample',
+                                             'rare_word_limit', 'max_ngrams', 'default_epochs', 'pos_only',
+                                             'convolution_layer', 'full_layer', 'rnn_layers', 'wide_and_deep',
+                                             'compressed_width', 'convolution_width', 'full_layer_width', 'rnn_width'])
+
+EXPERIMENT_NR = 10
+configuration = Configuration(
+    small_sample=False,  # Iff true, use only a small subsample for a proof of concept test
+    rare_word_limit=10,  # Only words and n-grams seen at least this many times will be used as features
+    input_embeddings=True,
+    input_wordshape=True,
+    input_ngrams=True,
+    max_ngrams=4,
+    default_epochs=5,
+    pos_only=False,
+    convolution_layer=False,
+    full_layer=True,
+    rnn_layers=1,
+    wide_and_deep=True,
+    compressed_width=400,
+    convolution_width=500,
+    full_layer_width=400,
+    rnn_width=200,
+)
 
 # Set up of constants
 TRAIN_DATA_FILENAME = 'data/train.json'
 EVAL_DATA_FILENAME = 'data/dev.json'
-EMBEDDINGS_FILENAME = None
-SMALL_TRAIN_LIMIT = 1000 if SMALL else None
-SMALL_EVAL_LIMIT = 100 if SMALL else None
-# TODO - descriptive experiment IDs that include configuration
+EMBEDDINGS_FILENAME = 'data/lt_polyglot_embeddings.pkl'
+TRAIN_LIMIT = 3000 if configuration.small_sample else None
+EVAL_LIMIT = 1000 if configuration.small_sample else None
 OUTPUT_DIR = 'exp{:03}'.format(EXPERIMENT_NR)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-print('Loading...')
-# Loading documents
-train_doc = LTDocument(TRAIN_DATA_FILENAME, SMALL_TRAIN_LIMIT)
-eval_doc = LTDocument(EVAL_DATA_FILENAME, SMALL_EVAL_LIMIT)
+def load_embeddings():
+    if configuration.input_embeddings:
+        with open(EMBEDDINGS_FILENAME, 'rb') as f:
+            data = pickle.load(f, encoding='latin1')
+        return data
+    else:
+        return None
 
-# Loading word embeddings
-if USE_WORDFORM_EMBEDDINGS:
-    embeddings = Word2Vec.load_word2vec_format(EMBEDDINGS_FILENAME, binary=True)
-else:
-    embeddings = None
+def train_tagger(tagger, epochs=configuration.default_epochs):
+    print('Loading...')
+    # Loading documents
+    train_doc = LTDocument(TRAIN_DATA_FILENAME, TRAIN_LIMIT, configuration.pos_only)
+    eval_doc = LTDocument(EVAL_DATA_FILENAME, EVAL_LIMIT, configuration.pos_only)
 
-# Build vocabularies and prepare vectorized document data
-vocabularies = Vocabularies(train_doc)
-featurefactory = FeatureFactory(vocabularies, embeddings)
-train_data = featurefactory.vectorize(train_doc, USE_WORDFORM_EMBEDDINGS, USE_WORDSHAPE, USE_NGRAMS, OUTPUT_ATTRIBUTES)
-eval_data = featurefactory.vectorize(eval_doc, USE_WORDFORM_EMBEDDINGS, USE_WORDSHAPE, USE_NGRAMS, OUTPUT_ATTRIBUTES)
+    # Loading word embeddings
+    embeddings = load_embeddings()
 
+    # Build vocabularies and prepare vectorized document data
+    vocabularies = Vocabularies(configuration, train_doc)
+    featurefactory = FeatureFactory(vocabularies, embeddings)
+    train_data = featurefactory.vectorize(train_doc, configuration)
+    eval_data = featurefactory.vectorize(eval_doc, configuration)
 
-def train_stuff(tagger, epochs=DEFAULT_EPOCHS):
-    # Uztrenējam modeli
+    if not tagger:
+        tagger = Tagger(configuration, featurefactory)
+    # Train the model
     print('Training...')
+    start_time = time.time()
     tagger.train(train_data, epochs, OUTPUT_DIR, eval_data)
+    end_time = time.time()
+    print('Trained in {}'.format(datetime.timedelta(seconds=int(end_time - start_time))))
     tagger.dump(OUTPUT_DIR)
     print('Model saved')
     tagger.tag(eval_doc, eval_data, vocabularies, OUTPUT_DIR + '/eval.tagged.txt')
     return tagger
 
-trained_tagger = train_stuff(Tagger(USE_WORDFORM_EMBEDDINGS, USE_WORDSHAPE, USE_NGRAMS, OUTPUT_ATTRIBUTES, featurefactory))
+
+def load_tagger():
+    print('Loading tagger ...', end='')
+    # Load embeddings
+    embeddings = load_embeddings()
+
+    # Load vocabularies
+    vocabularies = Vocabularies(configuration, folder=OUTPUT_DIR)
+    featurefactory = FeatureFactory(vocabularies, embeddings)
+
+    # Ielādējam tageri
+    tagger = Tagger(configuration, featurefactory)
+    tagger.load_model(OUTPUT_DIR)
+    print('OK')
+    return vocabularies, featurefactory, tagger
+
+def train_some_more():
+    vocabularies, featurefactory, trained_tagger = load_tagger()
+
+    # Load the documents
+    print('Loading documents ...', end='')
+    train_doc = LTDocument(TRAIN_DATA_FILENAME, TRAIN_LIMIT, configuration.pos_only)
+    train_data = featurefactory.vectorize(train_doc, configuration)
+    eval_doc = LTDocument(EVAL_DATA_FILENAME, EVAL_LIMIT, configuration.pos_only)
+    eval_data = featurefactory.vectorize(eval_doc, configuration)
+    print('OK')
+
+    # Train the model some more
+    print('Training...')
+    start_time = time.time()
+    trained_tagger.train(train_data, 4, OUTPUT_DIR, eval_data)
+    end_time = time.time()
+    print('Trained in {}'.format(datetime.timedelta(seconds=int(end_time - start_time))))
+    trained_tagger.dump(OUTPUT_DIR)
+    print('Model saved')
+
+    trained_tagger.tag(eval_doc, eval_data, vocabularies, OUTPUT_DIR + '/eval.tagged.txt')
+
+# trained_tagger = train_tagger(None)
+train_some_more()
 
 print('Done!')

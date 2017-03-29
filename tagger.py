@@ -1,18 +1,22 @@
 import tensorflow as tf
 import datetime
+import json
+import random
+
 
 # Tageris ar modeli utml
 class Tagger(object):
-    def __init__(self, use_wordform_embeddings, use_wordshape, use_ngrams, output_attributes, featurefactory=None):
+    def __init__(self, configuration, featurefactory=None):
         self.session = None
-        self.use_wordform_embeddings = use_wordform_embeddings
-        self.use_wordshape = use_wordshape
-        self.use_ngrams = use_ngrams
+        self.configuration = configuration
+        self.use_wordform_embeddings = configuration.input_embeddings
+        self.use_wordshape = configuration.input_wordshape
+        self.use_ngrams = configuration.input_ngrams
         self.output_pos = False
         self.output_tag = False
-        self.output_attributes = output_attributes
+        self.output_attributes = True
         self._featurefactory = featurefactory  # vajag tādēļ, ka modelim ir svarīgi vārdnīcu izmēri utml
-        self._prepare_graph()
+        self._prepare_graph(configuration)
 
     def __del__(self):
         if self.session:
@@ -37,7 +41,7 @@ class Tagger(object):
                 feed_dict[self.attribute_ids] = sentence.attribute_ids
         return feed_dict
 
-    def _prepare_graph(self):
+    def _prepare_graph(self, configuration):
         tf.reset_default_graph()
 
         self.dropout_keep_prob = tf.placeholder(tf.float32, name='dropout_keep_prob')
@@ -50,7 +54,7 @@ class Tagger(object):
                 wordform_vector_size = self._featurefactory.wordform_vector_size()
                 self.wordform_ids = tf.placeholder(tf.int64, [None], name='wordform_ids')
                 wordform_onehot = tf.one_hot(self.wordform_ids, wordform_vector_size, 1.0, 0.0, name='wordform_onehot')
-                compressed_wordform = fully_connected_layer(wordform_onehot, self.dropout_keep_prob, 400,
+                compressed_wordform = fully_connected_layer(wordform_onehot, self.dropout_keep_prob, configuration.compressed_width,
                                                             'compressed_wordform')
                 input_vectors.append(wordform_onehot)
                 compressed_input_vectors.append(compressed_wordform)
@@ -69,7 +73,7 @@ class Tagger(object):
                 ngram_vector_size = self._featurefactory.ngram_vector_size()
                 self.ngrams = tf.placeholder(tf.float32, [None, ngram_vector_size], name='ngram_nhot')
                 input_vectors.append(self.ngrams)
-                compressed_ngrams = fully_connected_layer(self.ngrams, self.dropout_keep_prob, 400, 'compressed_ngrams')
+                compressed_ngrams = fully_connected_layer(self.ngrams, self.dropout_keep_prob, configuration.compressed_width, 'compressed_ngrams')
                 compressed_input_vectors.append(compressed_ngrams)
             input_vector = tf.concat(1, input_vectors)
             compressed_input_vector = tf.concat(1, compressed_input_vectors)
@@ -88,12 +92,18 @@ class Tagger(object):
 
         # layer = input_vector
         layer = compressed_input_vector
-        #         layer = convolution_layer(layer, window=3, hidden_units=500, name_scope = 'convolution1')
-        #         layer = fully_connected_layer(layer, self.dropout_keep_prob, 400)
-        # layer = recurrent_layer(layer, self.sentence_length, self.dropout_keep_prob, 'recurrent1', rnn_hidden=200)
-        #         layer = recurrent_layer(layer, self.sentence_length, self.dropout_keep_prob, 'recurrent2', rnn_hidden=300)
-        #         layer = recurrent_layer(layer, self.sentence_length, self.dropout_keep_prob, 'recurrent3', rnn_hidden=300)
-        #         layer = tf.concat(1, [input_vector, layer]) # wide and deep
+        if configuration.convolution_layer:
+            layer = convolution_layer(layer, window=3, hidden_units=configuration.convolution_width, name_scope='convolution1')
+        if configuration.full_layer:
+            layer = fully_connected_layer(layer, self.dropout_keep_prob, configuration.full_layer_width)
+        if configuration.rnn_layers >= 1:
+            layer = recurrent_layer(layer, self.sentence_length, self.dropout_keep_prob, 'recurrent1', rnn_hidden=configuration.rnn_width)
+        if configuration.rnn_layers >= 2:
+            layer = recurrent_layer(layer, self.sentence_length, self.dropout_keep_prob, 'recurrent2', rnn_hidden=configuration.rnn_width)
+        if configuration.rnn_layers >= 3:
+            layer = recurrent_layer(layer, self.sentence_length, self.dropout_keep_prob, 'recurrent3', rnn_hidden=configuration.rnn_width)
+        if configuration.wide_and_deep:
+            layer = tf.concat(1, [input_vector, layer])  # wide and deep
         final_layer = layer
         final_layer_size = final_layer.get_shape().as_list()[1]
 
@@ -101,7 +111,7 @@ class Tagger(object):
         with tf.name_scope('softmax'):
             weights = tf.Variable(tf.truncated_normal([final_layer_size, output_vector_size], stddev=0.1),
                                   name='weights')  # simple mapping from all words to all tags
-            bias = tf.Variable(tf.zeros([output_vector_size]), name='bias')
+            bias = tf.Variable(tf.constant(0.1, shape=[output_vector_size]), name='bias')
             output_vector = tf.nn.softmax(tf.matmul(final_layer, weights) + bias, name='output_vector')
 
         regularization_coeff = 1e-7
@@ -113,8 +123,8 @@ class Tagger(object):
                 loss = cross_entropy + regularization_coeff * (tf.nn.l2_loss(weights) + tf.nn.l2_loss(bias))
             else:
                 loss = cross_entropy
-            cross_entropy_summary = tf.scalar_summary('cross entropy', cross_entropy)
-            loss_summary = tf.scalar_summary('loss', loss)
+            cross_entropy_summary = tf.summary.scalar('cross entropy', cross_entropy)
+            loss_summary = tf.summary.scalar('loss', loss)
             self.train_step = tf.train.AdamOptimizer(1e-4).minimize(loss, name='train_step')
 
         with tf.name_scope('evaluate'):
@@ -125,8 +135,8 @@ class Tagger(object):
                 start_index = start_index + attribute_vector_size
             assert start_index == output_vector_size  # ka viss outputs ir noprocesēts
 
-        init = tf.initialize_all_variables()
-        self.merged = tf.merge_all_summaries()
+        init = tf.global_variables_initializer()
+        self.merged = tf.summary.merge_all()
         self.session = tf.Session()
         self.saver = tf.train.Saver()
         self.session.run(init)
@@ -134,15 +144,16 @@ class Tagger(object):
     def train(self, train_data, epochs, output_dir, test_data=None):
         sentence_count = 0
         self.run_id = datetime.datetime.now().strftime("%Y%m%d-%H%M")
-        self.train_writer = tf.train.SummaryWriter(output_dir + '/tb/train' + self.run_id, self.session.graph)
-        self.test_writer = tf.train.SummaryWriter(output_dir + '/tb/test' + self.run_id)
+        self.train_writer = tf.summary.FileWriter(output_dir + '/tb/train' + self.run_id, self.session.graph)
+        self.test_writer = tf.summary.FileWriter(output_dir + '/tb/test' + self.run_id)
 
         for epoch in range(1, epochs + 1):
+            random.shuffle(train_data)
             for sentence in train_data:
                 # Bez tensorboard tikai šis
                 # self.session.run(self.train_step, feed_dict = {self.token_ids : sentence_wordforms, self.tag_ids : sentence_tags})
                 sentence_count = sentence_count + 1
-                if sentence_count % 1000 == 0:
+                if sentence_count % 5000 == 0:
                     #                     run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
                     #                     run_metadata = tf.RunMetadata()
                     #                     summary, _ = self.session.run([self.merged, self.train_step], feed_dict = self._feed_dict(sentence, train=True),
@@ -166,7 +177,8 @@ class Tagger(object):
                         if self.output_attributes:
                             # TODO - metrika atribūtu precizitātei
                             pass
-                elif sentence_count % 10 == 9:
+                elif sentence_count % 1000 == 999:
+                    print('.', end='', flush=True)
                     summary, _ = self.session.run([self.merged, self.train_step],
                                                   feed_dict=self._feed_dict(sentence, train=True))
                     self.train_writer.add_summary(summary, sentence_count)
@@ -221,6 +233,8 @@ class Tagger(object):
     def dump(self, folder, filename='model.tf'):
         self._featurefactory.dump(folder)
         self.saver.save(self.session, folder + '/' + filename)
+        with open(folder + '/configuration.json', 'w', encoding='utf8') as outfile:
+            json.dump(self.configuration, outfile, indent=2, ensure_ascii=False)
 
     def load_model(self, folder):
         self.saver.restore(self.session, folder + '/model.tf')
@@ -260,7 +274,7 @@ def fully_connected_layer(input_layer, dropout_keep_prob, hidden_units, name_sco
     input_vector_size = input_layer.get_shape().as_list()[1]
     with tf.name_scope(name_scope):
         weights = tf.Variable(tf.truncated_normal([input_vector_size, hidden_units], stddev=0.1), name='weights')
-        bias = tf.Variable(tf.zeros([hidden_units]), name='bias')  # FIXME - te vajag fiksētu 0.1+
+        bias = tf.Variable(tf.constant(0.1, shape=[hidden_units]), name='bias')
         fc = tf.nn.relu(tf.matmul(input_layer, weights) + bias, name=name_scope)
         return tf.nn.dropout(fc, dropout_keep_prob)
 

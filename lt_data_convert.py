@@ -125,7 +125,7 @@ def load_lt_file(file):
                     # print('{}\t{}\t{}'.format(word, lemma, tags))
                     word = {
                         'wordform': wordform,
-                        # 'gold_lemma' : lemma,
+                        # 'gold_lemma': lemma,
                         'gold_attributes': convert_attributes(tags),
                         'tags': tags
                     }
@@ -140,11 +140,12 @@ def load_lt_file(file):
                 match = re.match('^<sep="(.*)">$', line, re.UNICODE)
                 if match:
                     sep = match.group(1)
-                    word = {
-                        'wordform': sep,
-                        'gold_attributes': {'POS': 'Sep'}
-                    }
-                    current_sentence.append(word)
+                    if sep:
+                        word = {
+                            'wordform': sep,
+                            'gold_attributes': {'POS': 'Sep'}
+                        }
+                        current_sentence.append(word)
                 else:
                     pass
                     # print('Slikta rinda |{}|'.format(line))
@@ -245,7 +246,7 @@ def load_lt_data(path, result_filename):
     # for key, count in c.most_common():
     #     print('{} : {}'.format(key, count))
     with open(result_filename, 'w', encoding='utf8') as outfile:
-        json.dump(sentences, outfile, indent=4, ensure_ascii=False)
+        json.dump(sentences, outfile, indent=2, ensure_ascii=False)
 
 
 # ------ main ----
